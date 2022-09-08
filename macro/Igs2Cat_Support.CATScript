@@ -1,0 +1,231 @@
+﻿Language="VBSCRIPT"
+'*********************************
+'Igs2Cat_Support.CATScript
+'ver 0.02
+'by kantoku
+
+'1-CATIAを起動
+'2-Igs2Cat_GroupByLayer.vbsを ﾀﾞﾌﾞﾙｸﾘｯｸし
+'  Cat-Dll_Env-Path.txtを作成
+'3-Igs2Cat_GroupByLayer.vbs
+'  Igs2Cat_Support.CATScript
+'  Cat-Dll_Env-Path.txt
+'  を同一ﾌｫﾙﾀﾞに置く
+'4-Igs2Cat_GroupByLayer.vbs にIgesﾌｧｲﾙをD&D
+'5-Igesﾌｧｲﾙと同一ﾌｫﾙﾀﾞにﾚｲﾔｰ分けされた状態の
+'  CATPartが出来上がり
+'*********************************
+
+'Option Explicit
+'*** 設定 変更しないで下さい ***
+Const ScriptName = "Igs2Cat_GroupByLayer"
+Const ListFileName = "Igs2Cat_GroupByLayer_IptLst.txt"
+'***
+
+'*********************************
+Sub CATMain()
+    Call InportIgs
+    If CATIA.Documents.Count < 1 Then
+        CATIA.Quit
+    End If
+End Sub
+
+Private Sub InportIgs()
+    'ﾘｽﾄ取得
+    Dim ListPath As String
+    ListPath = CATIA.SystemService.Environ("CATTemp") + "\" + ListFileName
+    If Not IsExists(ListPath) Then
+    	MsgBox "ｲﾝﾎﾟｰﾄﾘｽﾄが見つかりませんでした!"
+    	Exit Sub
+    End If
+    
+    Dim IptLst As Variant
+    IptLst = ReadFile(ListPath)
+
+    'ﾙｰﾌﾟ
+    Dim I As Long
+    Dim Msg As String
+    Dim ConvName As Variant
+    Msg = "-- 変換後のﾘｽﾄです --" + VbNewLine
+    For I = 0 To UBound(IptLst)
+        If IsExists(IptLst(I)) Then
+            'Open
+            Call CATIA.Documents.Open(IptLst(I))
+            
+            'Layer
+            Call GroupByLayer
+            
+            'Save
+            Dim NewName
+	    NewName = GetNewName(IptLst(I))
+	    ConvName = SplitPathName(NewName)
+	    Msg = Msg + ConvName(1) + "." + ConvName(2) + VbNewLine
+            With CATIA.ActiveDocument
+                Call .SaveAs(NewName)
+                Call .Close
+            End With
+        End If
+    Next
+    
+    'ﾘｽﾄ削除
+    Call GetFSO.DeleteFile(ListPath)
+    MsgBox Msg, vbOKOnly, ScriptName
+    CATIA.Quit
+End Sub
+
+'重複しない名前取得
+Private Function GetNewName(ByVal IgsPath) As String
+    Dim Path As Variant
+    Path = SplitPathName(IgsPath)
+    
+    Dim Ext As String
+    Ext = ".CATPart"
+    
+    Dim NewPath As String
+    NewPath = Path(0) + "\" + Path(1)
+    
+    If Not IsExists(NewPath + Ext) Then
+        GetNewName = NewPath + Ext
+        Exit Function
+    End If
+    
+    Dim I As Long
+    I = 0
+    
+    Dim TempName As String
+    Do
+        I = I + 1
+        TempName = NewPath + "_" + CStr(I) + Ext
+        If Not IsExists(TempName) Then
+            GetNewName = TempName
+            Exit Function
+        End If
+    Loop
+End Function
+
+'ﾚｲﾔ毎の形状ｾｯﾄ分割
+Private Sub GroupByLayer()
+    'PartDocument
+    If Not IsPartDocument(CATIA.ActiveDocument) Then Exit Sub
+    Dim Doc As PartDocument
+    Set Doc = CATIA.ActiveDocument
+
+    Dim Pt As Part
+    Set Pt = Doc.Part
+    
+    Dim HBodies As HybridBodies
+    Set HBodies = Pt.HybridBodies
+    If HBodies.Count < 1 Then Exit Sub '形状ｾｯﾄなし
+    
+    Dim Shapes As HybridShapes
+    Set Shapes = HBodies.Item(1).HybridShapes
+    If Shapes.Count < 1 Then Exit Sub '1個目の形状ｾｯﾄ空
+    
+    Dim Fact As HybridShapeFactory
+    Set Fact = Pt.HybridShapeFactory
+    
+    Dim Sel As Selection
+    Set Sel = Doc.Selection
+    
+    'ﾙｰﾌﾟｶｳﾝﾀ
+    Dim I As Long
+    I = 0
+    Dim j As Long
+    
+    'ﾚｲﾔ取得用
+    Dim Layertype As Long
+    Dim Layer As Long
+    Dim Ref As Reference
+    
+    '削除用
+    Dim DelList() As AnyObject
+    
+    'ﾍﾟｰｽﾄ先形状ｾｯﾄ
+    Dim HB As HybridBody
+    
+    Dim VisProperty As VisPropertySet
+    Set VisProperty = Sel.VisProperties
+    
+    CATIA.HSOSynchronized = False
+    Do
+        I = I + 1
+        Set Ref = Shapes.Item(I)
+        With Sel
+            'ﾚｲﾔﾁｪｯｸ
+            Call .Clear
+            Call .Add(Ref)
+            Call VisProperty.GetLayer(Layertype, Layer)
+        End With
+        If Layertype = 0 Then
+            With Sel
+                '同一ﾚｲﾔ取得
+                Call .Clear
+                .Search "CATGmoSearch.&Layer=" & CStr(Layer) & ",all"
+                
+                '削除準備
+                ReDim DelList(.Count2)
+                For j = 1 To .Count2
+                    Set DelList(j) = .Item2(j).Value
+                Next
+                
+                'ｺﾋﾟﾍﾟ
+                .Copy
+                .Clear
+                Set HB = HBodies.Add()
+                HB.Name = "Layer" & CStr(Layer)
+                Call .Add(HB)
+                .Paste
+                .Clear
+            End With
+            
+            '削除
+            For j = 1 To UBound(DelList)
+                Call Fact.DeleteObjectForDatum(DelList(j))
+            Next
+            I = I - 1 '再ループ
+        End If
+    Loop Until I >= Shapes.Count
+    CATIA.HSOSynchronized = True
+    
+    '終了
+    Pt.Update
+End Sub
+
+'CATPartﾁｪｯｸ
+Private Function IsPartDocument(ByVal Doc) As Boolean
+    IsPartDocument = True
+    If Not TypeName(Doc) = "PartDocument" Then
+        MsgBox "CATPartﾌｧｲﾙのみ対応しています"
+        IsPartDocument = False
+    End If
+End Function
+
+'FileSystemObject
+Private Function GetFSO() As Object
+    Set GetFSO = CreateObject("Scripting.FileSystemObject")
+End Function
+
+'ﾊﾟｽ/ﾌｧｲﾙ名/拡張子 分割
+'Return: 0-Path 1-BaseName 2-Extension
+Private Function SplitPathName(ByVal FullPath) As Variant
+    Dim Path(2) As String
+    With GetFSO
+        Path(0) = .GetParentFolderName(FullPath)
+        Path(1) = .GetBaseName(FullPath)
+        Path(2) = .GetExtensionName(FullPath)
+    End With
+    SplitPathName = Path
+End Function
+
+'ﾌｧｲﾙの有無
+Private Function IsExists(ByVal Path) As Boolean
+    IsExists = GetFSO.FileExists(Path)
+End Function
+
+'ﾌｧｲﾙ読み込み
+Private Function ReadFile(ByVal Path) As Variant
+    With GetFSO.GetFile(Path).OpenAsTextStream
+        ReadFile = Split(.ReadAll, vbNewLine)
+        .Close
+    End With
+End Function
